@@ -67,7 +67,11 @@ ROLLOUT_ARGS=(
    --prompt-data ${ARTIFACT_ROOT}/obstacles-seeds/train.jsonl
    --input-key prompt
    --label-key seed
-   --rollout-shuffle
+   # NOTE: do NOT enable --rollout-shuffle. obstacles_data_preprocess.py writes the
+   # dataset stratified round-robin across envs (A,B,A,B,...); slime serves each
+   # rollout step a contiguous slice, so this ordering makes every batch exactly
+   # balanced across envs. Shuffling would randomly permute it and break that
+   # guarantee (batches would only be balanced in expectation).
    --reward-key score
    --num-rollout 100
    --rollout-batch-size 16

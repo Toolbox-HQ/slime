@@ -53,10 +53,14 @@ ROLLOUT_ARGS=(
    # Seed dataset produced by obstacles_data_preprocess.py. Each row is
    # {"prompt": <game rules>, "seed": <int>}; the seed arrives on sample.label
    # and the env is reconstructed from it at rollout time.
-   --prompt-data $HOME/obstacles-seeds/train.jsonl
+   --prompt-data $HOME/obstacles-seeds/train_frogger.jsonl
    --input-key prompt
    --label-key seed
-   --rollout-shuffle
+   # NOTE: do NOT enable --rollout-shuffle. obstacles_data_preprocess.py writes the
+   # dataset stratified round-robin across envs (A,B,A,B,...); slime serves each
+   # rollout step a contiguous slice, so this ordering makes every batch exactly
+   # balanced across envs. Shuffling would randomly permute it and break that
+   # guarantee (batches would only be balanced in expectation).
    --reward-key score
    --num-rollout 100
    --rollout-batch-size 32
@@ -137,6 +141,30 @@ CUSTOM_ARGS=(
    --custom-rm-path generate_with_obstacles.reward_func
 )
 
+# Evaluation on held-out seed sets, one per env so each gets its own metric curve.
+# Build them the same way as the train set (the eval pipeline reuses
+# --input-key/--label-key and metadata.env, so env dispatch works in eval too),
+# but with a different --seed so the seeds don't overlap the train set:
+#   PYTHONPATH=./real-time python3 slime/examples/realtime/obstacles_data_preprocess.py \
+#       --env clear_obstacles --train-size 256 --seed 999 \
+#       --out $HOME/obstacles-seeds/eval_clear.jsonl
+#   PYTHONPATH=./real-time python3 slime/examples/realtime/obstacles_data_preprocess.py \
+#       --env static_obstacles --train-size 256 --seed 999 \
+#       --out $HOME/obstacles-seeds/eval_static.jsonl
+#   PYTHONPATH=./real-time python3 slime/examples/realtime/obstacles_data_preprocess.py \
+#       --env frogger --train-size 256 --seed 999 \
+#       --out $HOME/obstacles-seeds/eval_frogger.jsonl
+# Each --eval-prompt-data <name> <path> pair is reported as a separate eval dataset,
+# so wandb shows each env's success rate independently.
+EVAL_ARGS=(
+   --eval-interval 5
+   --eval-prompt-data frogger $HOME/obstacles-seeds/eval_frogger.jsonl
+   --n-samples-per-eval-prompt 1
+   --eval-max-response-len 16384
+   --eval-temperature 0.7
+   --eval-top-p 0.95
+)
+
 # Cap the open-file limit: the default (1048576) triggers a raylet SIGABRT crash
 # ("Too many open files") in gRPC/boost-asio, which kills the dashboard job agent
 # and makes `ray job submit` fail with a 500 / ServerDisconnectedError.
@@ -174,4 +202,5 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${PERF_ARGS[@]} \
    ${SGLANG_ARGS[@]} \
    ${MISC_ARGS[@]} \
-   ${CUSTOM_ARGS[@]}
+   ${CUSTOM_ARGS[@]} \
+   ${EVAL_ARGS[@]}

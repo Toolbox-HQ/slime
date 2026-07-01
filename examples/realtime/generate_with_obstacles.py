@@ -33,9 +33,30 @@ from slime.rollout.sglang_rollout import GenerateState
 from slime.utils.http_utils import post
 from slime.utils.types import Sample
 
-# The obstacles environment lives in real-time/environment; it must be on
+# The obstacles environments live in real-time/environment; they must be on
 # PYTHONPATH (the training script adds ./real-time).
 from environment.clear_obstacles import CLEAR_SYSTEM_PROMPT, ClearObstaclesToolEnv
+from environment.frogger import FROGGER_SYSTEM_PROMPT, FroggerToolEnv
+from environment.static_obstacles_grpo import SYSTEM_PROMPT as STATIC_SYSTEM_PROMPT
+from environment.static_obstacles_grpo import StaticObstaclesToolEnv
+
+# Selectable environments, keyed by the ``env`` field carried on
+# ``sample.metadata`` (populated by obstacles_data_preprocess.py). Each entry
+# pairs the tool-env class with the default system prompt to fall back on when a
+# dataset row does not carry its own. To add a task here, register its ToolEnv
+# wrapper (must expose reset(seed=...), move_*, .done, .reward, .env.won) and a
+# default prompt — nothing else in this file needs to change.
+ENV_REGISTRY: dict[str, tuple[type, str]] = {
+    "clear_obstacles": (ClearObstaclesToolEnv, CLEAR_SYSTEM_PROMPT),
+    "static_obstacles": (StaticObstaclesToolEnv, STATIC_SYSTEM_PROMPT),
+    "frogger": (FroggerToolEnv, FROGGER_SYSTEM_PROMPT),
+}
+# Used when a sample carries no ``env`` (keeps old single-task datasets working).
+DEFAULT_ENV = "clear_obstacles"
+
+# Any registered tool-env. The wrappers are duck-typed (no shared base class),
+# so this is a plain union of the registered classes for annotation purposes.
+ToolEnv = ClearObstaclesToolEnv | StaticObstaclesToolEnv | FroggerToolEnv
 
 # Max number of moves (tool calls) before we cut the episode off.
 MAX_TURNS = 64
@@ -157,7 +178,7 @@ def tool_response_turn(content: str, open_assistant: bool) -> str:
     return turn
 
 
-def step_environment(env: ClearObstaclesToolEnv, prediction: str) -> tuple[str, bool]:
+def step_environment(env: ToolEnv, prediction: str) -> tuple[str, bool]:
     """Apply the model's move to the live env and return (tool_response_content, done).
 
     Returns the raw grid render (or INVALID_ACTION_MSG); the turn markers are added
@@ -185,14 +206,24 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     state = GenerateState(args)
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
 
+    # Pick the environment for this sample. The dataset tags each row with an
+    # `env` on sample.metadata (see obstacles_data_preprocess.py); rows without
+    # one fall back to DEFAULT_ENV so single-task datasets keep working.
+    meta = sample.metadata or {}
+    env_name = meta.get("env", DEFAULT_ENV)
+    try:
+        env_cls, default_system_prompt = ENV_REGISTRY[env_name]
+    except KeyError:
+        raise ValueError(f"Unknown env '{env_name}'; registered: {sorted(ENV_REGISTRY)}")
+
     # Reconstruct the exact grid from the dataset seed and keep this env instance
     # live across every move below.
     seed = int(sample.label) if sample.label is not None else None
-    env = ClearObstaclesToolEnv()
+    env = env_cls()
     initial_obs = env.reset(seed=seed) if seed is not None else env.reset()
 
     # Carry the system prompt from the dataset (falls back to the env's default).
-    system_prompt = sample.prompt if isinstance(sample.prompt, str) and sample.prompt else CLEAR_SYSTEM_PROMPT
+    system_prompt = sample.prompt if isinstance(sample.prompt, str) and sample.prompt else default_system_prompt
     prompt = format_initial_prompt(system_prompt, initial_obs)
 
     prompt_tokens_ids = state.tokenizer(prompt, add_special_tokens=False)["input_ids"]

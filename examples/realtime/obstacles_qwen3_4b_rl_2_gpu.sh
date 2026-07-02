@@ -4,6 +4,8 @@
 # The model plays a grid game via move_up/move_down/move_left/move_right tool
 # calls; reward is 1.0 for reaching the GOAL row, 0.0 otherwise.
 
+eval "$("${MAMBA_ROOT_PREFIX:-$HOME/micromamba}/bin/micromamba" shell hook --shell bash)"
+micromamba activate slime
 # for rerun the task
 pkill -9 sglang
 sleep 3
@@ -15,6 +17,8 @@ pkill -9 ray
 pkill -9 python
 
 set -ex
+
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-$HOME}
 
 # will prevent ray from buffering stdout/stderr
 export PYTHONUNBUFFERED=1
@@ -37,7 +41,15 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 # Repo root that contains slime/, real-time/, Megatron-LM/ (this script lives at
 # slime/examples/realtime/), used to put the obstacles `environment` package on
 # PYTHONPATH.
-REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." &>/dev/null && pwd)"
+# When submitted via sbatch, BASH_SOURCE[0] resolves to a SLURM-managed temp copy of
+# the script, making SCRIPT_DIR wrong. Use SLURM_SUBMIT_DIR (the directory where sbatch
+# was invoked, i.e. the repo root) to recompute both paths in that case.
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    REPO_ROOT="${SLURM_SUBMIT_DIR}"
+    SCRIPT_DIR="${REPO_ROOT}/slime/examples/realtime"
+else
+    REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../../.." &>/dev/null && pwd)"
+fi
 source "slime/scripts/models/qwen3-4B.sh"
 
 # Per-run artifact directory: a fresh UUID is generated each time the run starts,
@@ -52,25 +64,19 @@ echo "RUN_ID: ${RUN_ID}"
 echo "Artifacts (checkpoints + rollout dumps) -> ${RUN_DIR}"
 
 CKPT_ARGS=(
-   --hf-checkpoint $HOME/Qwen/Qwen3-4B
-   --ref-load $HOME/Qwen/Qwen3-4B_torch_dist
-   # --load $HOME/Qwen3-4B_slime/
-   --load "${REPO_ROOT}/.cache/a124b99e-49f5-4a77-89df-f6ce8eee273f/checkpoints"
+   --hf-checkpoint ${ARTIFACT_ROOT}/Qwen/Qwen3-4B
+   --ref-load ${ARTIFACT_ROOT}/Qwen/Qwen3-4B_torch_dist
+   # --load ${ARTIFACT_ROOT}/Qwen3-4B_slime/
    --save ${RUN_DIR}/checkpoints/
    --save-interval 20
    --rotary-base 1000000
-   # We bump --num-rollout below to train past the original schedule, which
-   # changes the derived lr_decay_steps and would otherwise fail the scheduler's
-   # checkpoint-consistency assert. Override it to use the new schedule values
-   # (LR is constant here anyway; step counting still resumes from num_steps).
-   --override-opt-param-scheduler
 )
 
 ROLLOUT_ARGS=(
    # Seed dataset produced by obstacles_data_preprocess.py. Each row is
    # {"prompt": <game rules>, "seed": <int>}; the seed arrives on sample.label
    # and the env is reconstructed from it at rollout time.
-   --prompt-data $HOME/obstacles-seeds/train_realtime_frogger.jsonl
+   --prompt-data ${ARTIFACT_ROOT}/obstacles-seeds/train_realtime_frogger.jsonl
    --input-key prompt
    --label-key seed
    # NOTE: do NOT enable --rollout-shuffle. obstacles_data_preprocess.py writes the

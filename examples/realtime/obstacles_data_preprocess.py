@@ -35,6 +35,7 @@ import random
 
 from environment.clear_obstacles import CLEAR_SYSTEM_PROMPT
 from environment.frogger import FROGGER_SYSTEM_PROMPT
+from environment.realtime_frogger import REALTIME_FROGGER_SYSTEM_PROMPT
 from environment.static_obstacles_grpo import SYSTEM_PROMPT as STATIC_SYSTEM_PROMPT
 
 # Default system prompt per environment. The keys must match ENV_REGISTRY in
@@ -44,6 +45,7 @@ ENV_SYSTEM_PROMPTS = {
     "clear_obstacles": CLEAR_SYSTEM_PROMPT,
     "static_obstacles": STATIC_SYSTEM_PROMPT,
     "frogger": FROGGER_SYSTEM_PROMPT,
+    "realtime_frogger": REALTIME_FROGGER_SYSTEM_PROMPT,
 }
 
 

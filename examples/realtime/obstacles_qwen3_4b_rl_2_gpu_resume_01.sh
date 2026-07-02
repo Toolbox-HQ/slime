@@ -55,15 +55,9 @@ CKPT_ARGS=(
    --hf-checkpoint $HOME/Qwen/Qwen3-4B
    --ref-load $HOME/Qwen/Qwen3-4B_torch_dist
    # --load $HOME/Qwen3-4B_slime/
-   --load "${REPO_ROOT}/.cache/a124b99e-49f5-4a77-89df-f6ce8eee273f/checkpoints"
    --save ${RUN_DIR}/checkpoints/
    --save-interval 20
    --rotary-base 1000000
-   # We bump --num-rollout below to train past the original schedule, which
-   # changes the derived lr_decay_steps and would otherwise fail the scheduler's
-   # checkpoint-consistency assert. Override it to use the new schedule values
-   # (LR is constant here anyway; step counting still resumes from num_steps).
-   --override-opt-param-scheduler
 )
 
 ROLLOUT_ARGS=(

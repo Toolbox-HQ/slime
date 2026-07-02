@@ -37,6 +37,7 @@ from slime.utils.types import Sample
 # PYTHONPATH (the training script adds ./real-time).
 from environment.clear_obstacles import CLEAR_SYSTEM_PROMPT, ClearObstaclesToolEnv
 from environment.frogger import FROGGER_SYSTEM_PROMPT, FroggerToolEnv
+from environment.realtime_frogger import REALTIME_FROGGER_SYSTEM_PROMPT, RealtimeFroggerToolEnv
 from environment.static_obstacles_grpo import SYSTEM_PROMPT as STATIC_SYSTEM_PROMPT
 from environment.static_obstacles_grpo import StaticObstaclesToolEnv
 
@@ -46,17 +47,21 @@ from environment.static_obstacles_grpo import StaticObstaclesToolEnv
 # dataset row does not carry its own. To add a task here, register its ToolEnv
 # wrapper (must expose reset(seed=...), move_*, .done, .reward, .env.won) and a
 # default prompt — nothing else in this file needs to change.
+#
+# Real-time envs (``token_aware = True``) instead expose move_*(tokens_elapsed);
+# step_environment passes the number of tokens the model produced this turn.
 ENV_REGISTRY: dict[str, tuple[type, str]] = {
     "clear_obstacles": (ClearObstaclesToolEnv, CLEAR_SYSTEM_PROMPT),
     "static_obstacles": (StaticObstaclesToolEnv, STATIC_SYSTEM_PROMPT),
     "frogger": (FroggerToolEnv, FROGGER_SYSTEM_PROMPT),
+    "realtime_frogger": (RealtimeFroggerToolEnv, REALTIME_FROGGER_SYSTEM_PROMPT),
 }
 # Used when a sample carries no ``env`` (keeps old single-task datasets working).
 DEFAULT_ENV = "clear_obstacles"
 
 # Any registered tool-env. The wrappers are duck-typed (no shared base class),
 # so this is a plain union of the registered classes for annotation purposes.
-ToolEnv = ClearObstaclesToolEnv | StaticObstaclesToolEnv | FroggerToolEnv
+ToolEnv = ClearObstaclesToolEnv | StaticObstaclesToolEnv | FroggerToolEnv | RealtimeFroggerToolEnv
 
 # Max number of moves (tool calls) before we cut the episode off.
 MAX_TURNS = 64
@@ -178,17 +183,30 @@ def tool_response_turn(content: str, open_assistant: bool) -> str:
     return turn
 
 
-def step_environment(env: ToolEnv, prediction: str) -> tuple[str, bool]:
+def step_environment(env: ToolEnv, prediction: str, tokens_elapsed: int) -> tuple[str, bool]:
     """Apply the model's move to the live env and return (tool_response_content, done).
 
     Returns the raw grid render (or INVALID_ACTION_MSG); the turn markers are added
-    by tool_response_turn at the call site, not here.
+    by tool_response_turn at the call site, not here. ``tokens_elapsed`` is the number
+    of tokens the model produced this turn; real-time envs (``token_aware``) use it to
+    advance their world, static envs ignore it.
     """
+    token_aware = getattr(env, "token_aware", False)
+
     action = parse_action(prediction)
     if action is None:
-        return INVALID_ACTION_MSG, False
+        if not token_aware:
+            return INVALID_ACTION_MSG, False
+        # Real-time env: the tokens were still spent, so advance the cars (which can
+        # run the frog over) even though no move is applied. If that ends the game,
+        # surface the GAME OVER text; otherwise show the error plus the updated grid.
+        obs = env.advance(tokens_elapsed)
+        if env.done:
+            return obs, True
+        return f"{INVALID_ACTION_MSG}\n{obs}", False
 
-    obs = getattr(env, action)()
+    move = getattr(env, action)
+    obs = move(tokens_elapsed) if token_aware else move()
     return obs, env.done
 
 
@@ -284,7 +302,9 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
         if output["meta_info"]["finish_reason"]["type"] == "length":
             break
 
-        obs_content, done = step_environment(env, cur_response)
+        # Tokens produced this turn drive real-time envs (cars move while the model
+        # thinks); static envs ignore the count.
+        obs_content, done = step_environment(env, cur_response, len(cur_response_token_ids))
         if parse_action(cur_response) is not None:
             move_count += 1
         if done:

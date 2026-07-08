@@ -3,9 +3,6 @@
 # RL on the clear-obstacles grid game (real-time/environment/clear_obstacles).
 # The model plays a grid game via move_up/move_down/move_left/move_right tool
 # calls; reward is 1.0 for reaching the GOAL row, 0.0 otherwise.
-
-eval "$("${MAMBA_ROOT_PREFIX:-$HOME/micromamba}/bin/micromamba" shell hook --shell bash)"
-micromamba activate slime
 # for rerun the task
 pkill -9 sglang
 sleep 3
@@ -66,7 +63,7 @@ echo "Artifacts (checkpoints + rollout dumps) -> ${RUN_DIR}"
 CKPT_ARGS=(
    --hf-checkpoint ${ARTIFACT_ROOT}/Qwen/Qwen3-4B
    --ref-load ${ARTIFACT_ROOT}/Qwen/Qwen3-4B_torch_dist
-   --load ${ARTIFACT_ROOT}/.cache/a124b99e-49f5-4a77-89df-f6ce8eee273f/checkpoints
+   --load ${REPO_ROOT}/.cache/80eb7924-8b0a-429c-9fb7-b83f48390473/checkpoints
    --save ${RUN_DIR}/checkpoints/
    --save-interval 20
    --rotary-base 1000000
@@ -90,7 +87,7 @@ ROLLOUT_ARGS=(
    # balanced across envs. Shuffling would randomly permute it and break that
    # guarantee (batches would only be balanced in expectation).
    --reward-key score
-   --num-rollout 100
+   --num-rollout 400
    --rollout-batch-size 32
    --n-samples-per-prompt 8
    --rollout-max-response-len 16384

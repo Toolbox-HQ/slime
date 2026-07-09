@@ -37,7 +37,11 @@ from slime.utils.types import Sample
 # PYTHONPATH (the training script adds ./real-time).
 from environment.clear_obstacles import CLEAR_SYSTEM_PROMPT, ClearObstaclesToolEnv
 from environment.frogger import FROGGER_SYSTEM_PROMPT, FroggerToolEnv
-from environment.realtime_frogger import REALTIME_FROGGER_SYSTEM_PROMPT, RealtimeFroggerToolEnv
+from environment.realtime_frogger import (
+    REALTIME_FROGGER_STREAM_SYSTEM_PROMPT,
+    REALTIME_FROGGER_SYSTEM_PROMPT,
+    RealtimeFroggerToolEnv,
+)
 from environment.static_obstacles_grpo import SYSTEM_PROMPT as STATIC_SYSTEM_PROMPT
 from environment.static_obstacles_grpo import StaticObstaclesToolEnv
 
@@ -55,6 +59,10 @@ ENV_REGISTRY: dict[str, tuple[type, str]] = {
     "static_obstacles": (StaticObstaclesToolEnv, STATIC_SYSTEM_PROMPT),
     "frogger": (FroggerToolEnv, FROGGER_SYSTEM_PROMPT),
     "realtime_frogger": (RealtimeFroggerToolEnv, REALTIME_FROGGER_SYSTEM_PROMPT),
+    # Same tool-env, but driven by the streaming rollout (generate_streaming): the
+    # grid is force-fed into the model's reasoning every movement window. Use with
+    # --custom-generate-function-path generate_with_obstacles.generate_streaming.
+    "realtime_frogger_stream": (RealtimeFroggerToolEnv, REALTIME_FROGGER_STREAM_SYSTEM_PROMPT),
 }
 # Used when a sample carries no ``env`` (keeps old single-task datasets working).
 DEFAULT_ENV = "clear_obstacles"
@@ -65,6 +73,11 @@ ToolEnv = ClearObstaclesToolEnv | StaticObstaclesToolEnv | FroggerToolEnv | Real
 
 # Max number of moves (tool calls) before we cut the episode off.
 MAX_TURNS = 64
+
+# Streaming rollout (generate_streaming): hard cap on movement windows (think-chunks
+# + moves) per episode, so a model that never emits a move still terminates. The
+# context-length guard usually trips first; this is just a backstop.
+STREAM_MAX_WINDOWS = 512
 
 # The four move tools exposed to the model.
 MOVES = ("move_up", "move_down", "move_left", "move_right")
@@ -180,6 +193,22 @@ def tool_response_turn(content: str, open_assistant: bool) -> str:
     turn = f"\n<|im_start|>user\n<tool_response>\n{content}\n</tool_response><|im_end|>\n"
     if open_assistant:
         turn += "<|im_start|>assistant\n"
+    return turn
+
+
+def inline_observation(content: str, close_turn: bool) -> str:
+    """Splice a live grid into the model's OPEN assistant turn (streaming rollout).
+
+    Unlike tool_response_turn (which closes the assistant turn and starts a native
+    <tool_response> user turn), this injects an <observation> block *inside* the
+    assistant's current reasoning without emitting <|im_end|>, so the model keeps
+    thinking with a refreshed view of the world. Injected verbatim with loss_mask=0.
+    close_turn=True appends <|im_end|> to end the episode (e.g. a car ran the frog
+    over mid-think), since no further generation follows.
+    """
+    turn = f"\n<observation>\n{content}\n</observation>\n"
+    if close_turn:
+        turn += "<|im_end|>\n"
     return turn
 
 
@@ -369,6 +398,203 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
             case "abort":
                 sample.status = Sample.Status.ABORTED
             case "stop":
+                sample.status = Sample.Status.COMPLETED
+
+    return sample
+
+
+async def generate_streaming(args, sample: Sample, sampling_params) -> Sample:
+    """Real-time *streaming* rollout for the realtime_frogger_stream env.
+
+    The world runs on a fixed token cadence: every ``tokens_per_movement`` tokens the
+    model produces is one movement window == one car tick. This differs from
+    ``generate`` (which advances the whole turn's tokens at once, only when the model
+    acts) in two ways:
+
+      * Force-feed: whenever a full window elapses while the model is still thinking
+        (it hit the per-chunk token cap without emitting a move), the cars advance one
+        cell and the current grid is spliced into the model's OPEN assistant turn as a
+        masked ``<observation>`` block. The model keeps reasoning with fresh state. A
+        stationary frog can be run over here.
+      * On a move, the remainder of the window elapses FIRST (cars advance one more
+        cell), THEN the move is applied and the resulting grid is returned as a native
+        ``<tool_response>`` -- cars-first order, same as ``env.act`` / the
+        non-streaming rollout.
+
+    Every injected token (observations and tool responses) carries loss_mask=0, so
+    only the model's own reasoning/move tokens are trained on. A move always consumes
+    a full window (it rounds up to the window boundary), so the cars advance exactly
+    one cell per window regardless of when in the window the move was emitted.
+    """
+    assert not args.partial_rollout, "Partial rollout is not supported for this function at the moment."
+
+    # Clear any stale state from a retried attempt (mirrors generate).
+    sample.rollout_log_probs = None
+    sample.response = ""
+    sample.response_length = 0
+    sample.loss_mask = None
+
+    state = GenerateState(args)
+    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+
+    meta = sample.metadata or {}
+    env_name = meta.get("env", "realtime_frogger_stream")
+    try:
+        env_cls, default_system_prompt = ENV_REGISTRY[env_name]
+    except KeyError:
+        raise ValueError(f"Unknown env '{env_name}'; registered: {sorted(ENV_REGISTRY)}")
+    if not getattr(env_cls, "token_aware", False):
+        raise ValueError(
+            f"generate_streaming requires a token-aware env; '{env_name}' is not. "
+            "Use a realtime_* env (e.g. realtime_frogger_stream)."
+        )
+
+    seed = int(sample.label) if sample.label is not None else None
+    env = env_cls()
+    initial_obs = env.reset(seed=seed) if seed is not None else env.reset()
+
+    # One movement window == this many tokens == one car tick. Read off the env so it
+    # always matches the env's own tokens_per_movement (injections land on ticks).
+    window = env.tokens_per_movement
+
+    system_prompt = sample.prompt if isinstance(sample.prompt, str) and sample.prompt else default_system_prompt
+    prompt = format_initial_prompt(system_prompt, initial_obs)
+
+    prompt_tokens_ids = state.tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    response = ""
+    response_token_ids = []
+    loss_masks = []
+    move_count = 0
+    injection_count = 0
+
+    if args.rollout_max_context_len is not None:
+        max_context_length = args.rollout_max_context_len
+    else:
+        max_context_length = args.context_parallel_size * args.max_tokens_per_gpu
+
+    output = None
+    for _window_idx in range(STREAM_MAX_WINDOWS):
+        total_length = len(prompt_tokens_ids) + len(response_token_ids)
+        if total_length >= max_context_length:
+            sample.status = Sample.Status.TRUNCATED
+            break
+
+        # Generate at most one window of tokens (or whatever context budget remains).
+        # Hitting `window` exactly == a full time-tick elapsed mid-think; hitting a
+        # smaller budget cap == out of room (truncation).
+        remaining_budget = max_context_length - total_length
+        chunk_cap = min(window, remaining_budget)
+        per_turn_sampling_params = dict(sampling_params)
+        per_turn_sampling_params["max_new_tokens"] = chunk_cap
+
+        payload = {
+            "input_ids": prompt_tokens_ids + response_token_ids,
+            "sampling_params": per_turn_sampling_params,
+            "return_logprob": True,
+        }
+        output = await post(url, payload)
+
+        if output["meta_info"]["finish_reason"]["type"] == "abort":
+            sample.status = Sample.Status.ABORTED
+            return sample
+
+        if "output_token_logprobs" not in output["meta_info"]:
+            # No per-token logprobs -> cannot keep rollout_log_probs in sync; abort so
+            # the group is retried instead of poisoning the trainer.
+            sample.status = Sample.Status.ABORTED
+            return sample
+
+        cur_response_token_ids = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
+        cur_response = state.tokenizer.decode(cur_response_token_ids)
+        cur_log_probs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
+        if sample.rollout_log_probs is None:
+            sample.rollout_log_probs = []
+        sample.rollout_log_probs += cur_log_probs
+
+        response += cur_response
+        response_token_ids += cur_response_token_ids
+        loss_masks += [1] * len(cur_response_token_ids)
+
+        finish = output["meta_info"]["finish_reason"]["type"]
+        action = parse_action(cur_response)
+        hit_full_window = finish == "length" and chunk_cap == window
+
+        # Decide what to append (masked env feedback) and whether the episode ends.
+        if action is not None:
+            # MOVE: the rest of the window elapses (cars +1), THEN the move is applied
+            # (cars-first order, same as env.act / the non-streaming rollout).
+            obs = getattr(env, action)(window)
+            move_count += 1
+            terminal = env.done
+            next_text = tool_response_turn(obs, open_assistant=not terminal)
+        elif hit_full_window:
+            # FORCE-FEED: a window elapsed mid-think. Cars +1 (may run over the
+            # stationary frog); splice the grid into the still-open assistant turn.
+            obs = env.advance(window)
+            injection_count += 1
+            terminal = env.done
+            next_text = inline_observation(obs, close_turn=terminal)
+        elif finish == "length":
+            # Hit the context budget (chunk_cap < window), not a real window boundary.
+            sample.status = Sample.Status.TRUNCATED
+            break
+        elif finish == "stop":
+            # Model ended its turn without a valid move; the window still elapses.
+            obs = env.advance(window)
+            terminal = env.done
+            msg = obs if terminal else f"{INVALID_ACTION_MSG}\n{obs}"
+            next_text = tool_response_turn(msg, open_assistant=not terminal)
+        else:
+            # Unexpected finish reason; stop defensively.
+            break
+
+        obs_tokens_ids = state.tokenizer(next_text, add_special_tokens=False)["input_ids"]
+        response += next_text
+        response_token_ids += obs_tokens_ids
+        loss_masks += [0] * len(obs_tokens_ids)
+        if sample.rollout_log_probs is not None:
+            sample.rollout_log_probs += [0.0] * len(obs_tokens_ids)
+            assert len(response_token_ids) == len(sample.rollout_log_probs), (
+                f"Token/logp length mismatch at window {_window_idx}: "
+                f"{len(response_token_ids)} tokens vs {len(sample.rollout_log_probs)} logps"
+            )
+
+        if terminal:
+            sample.status = Sample.Status.COMPLETED
+            break
+
+        # Injected feedback is appended verbatim and can push us past the budget;
+        # trim the tail so the final sample fits the training budget exactly.
+        overflow = len(prompt_tokens_ids) + len(response_token_ids) - max_context_length
+        if overflow > 0:
+            response_token_ids = response_token_ids[:-overflow]
+            loss_masks = loss_masks[:-overflow]
+            if sample.rollout_log_probs is not None:
+                sample.rollout_log_probs = sample.rollout_log_probs[:-overflow]
+            response = state.tokenizer.decode(response_token_ids)
+            sample.status = Sample.Status.TRUNCATED
+            break
+
+    # Terminal reward from the env (1.0 win / 0.0 otherwise), stashed for reward_func.
+    sample.metadata = dict(sample.metadata or {})
+    sample.metadata["env_reward"] = float(env.reward)
+    sample.metadata["env_done"] = bool(env.done)
+    sample.metadata["env_won"] = bool(env.env.won) if env.env is not None else False
+    sample.metadata["move_count"] = move_count
+    sample.metadata["injection_count"] = injection_count
+
+    sample.tokens = prompt_tokens_ids + response_token_ids
+    sample.response_length = len(response_token_ids)
+    sample.response = response
+    sample.loss_mask = loss_masks
+
+    if sample.status == Sample.Status.PENDING:
+        match (output["meta_info"]["finish_reason"]["type"] if output is not None else "stop"):
+            case "length":
+                sample.status = Sample.Status.TRUNCATED
+            case "abort":
+                sample.status = Sample.Status.ABORTED
+            case _:
                 sample.status = Sample.Status.COMPLETED
 
     return sample

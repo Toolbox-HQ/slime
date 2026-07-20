@@ -15,11 +15,28 @@
 #     step from the checkpoint, so it continues where the old run stopped)
 #   * --num-rollout is raised 100 -> 400 to train past the original schedule
 #   * --override-opt-param-scheduler (see comment in CKPT_ARGS)
-# A fresh RUN_DIR is still created: new checkpoints and rollout dumps go to the
-# new run's directory, leaving the old run untouched.
+# No new RUN_DIR is created: the run continues in the directory it loads from,
+# so new checkpoints and rollout dumps accumulate there. This makes the script
+# safe to requeue with the same argument -- each restart resumes from the latest
+# checkpoint saved in that directory.
 
-eval "$("${MAMBA_ROOT_PREFIX:-$HOME/micromamba}/bin/micromamba" shell hook --shell bash)"
-micromamba activate slime
+# Locate the micromamba binary: MAMBA_ROOT_PREFIX is the *env* root and does not
+# necessarily contain the binary (here it lives in ~/.local/bin), so probe PATH
+# first and fall back to the common install locations. Activation must succeed --
+# everything below (python, ray, $CONDA_PREFIX-based LIBRARY_PATH) needs the env --
+# so fail loudly instead of silently continuing with system python.
+MICROMAMBA_BIN="$(command -v micromamba || true)"
+if [ -z "${MICROMAMBA_BIN}" ]; then
+    for cand in "${MAMBA_ROOT_PREFIX:-$HOME/micromamba}/bin/micromamba" "$HOME/.local/bin/micromamba" "$HOME/micromamba/bin/micromamba"; do
+        if [ -x "${cand}" ]; then MICROMAMBA_BIN="${cand}"; break; fi
+    done
+fi
+if [ -z "${MICROMAMBA_BIN}" ]; then
+    echo "ERROR: micromamba binary not found (checked PATH, \$MAMBA_ROOT_PREFIX/bin, ~/.local/bin, ~/micromamba/bin)" >&2
+    exit 1
+fi
+eval "$("${MICROMAMBA_BIN}" shell hook --shell bash)"
+micromamba activate slime || { echo "ERROR: failed to activate micromamba env 'slime'" >&2; exit 1; }
 # for rerun the task
 pkill -9 sglang
 sleep 3
@@ -83,14 +100,15 @@ if [ ! -d "${LOAD_DIR}" ]; then
 fi
 echo "Resuming from: ${LOAD_DIR}"
 
-# Per-run artifact directory: a fresh UUID is generated each time the run starts,
-# and every local artifact (model checkpoints + rollout/completion dumps -- i.e.
-# everything except the wandb logs) is written under <repo root>/.cache/<uuid>/.
-# Anchored to REPO_ROOT so it lands in the same place regardless of cwd. This
-# keeps runs isolated and easy to clean up.
-RUN_ID="$(uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
-RUN_DIR="${REPO_ROOT}/.cache/${RUN_ID}"
-mkdir -p "${RUN_DIR}"
+# Continue in the same run directory we are loading from: RUN_DIR is the parent
+# of the checkpoints dir, so new checkpoints and rollout dumps accumulate in the
+# original run's directory instead of a fresh one. Because --save and --load are
+# the same dir, a requeued/restarted job re-resolves this same directory and
+# Megatron's latest_checkpointed_iteration.txt tracker (updated on every save)
+# makes it resume from the newest checkpoint rather than the one this script was
+# first pointed at.
+RUN_DIR="$(cd -- "${LOAD_DIR}/.." &>/dev/null && pwd)"
+RUN_ID="$(basename "${RUN_DIR}")"
 echo "RUN_ID: ${RUN_ID}"
 echo "Artifacts (checkpoints + rollout dumps) -> ${RUN_DIR}"
 
@@ -98,8 +116,19 @@ CKPT_ARGS=(
    --hf-checkpoint ${ARTIFACT_ROOT}/Qwen/Qwen3-4B
    --ref-load ${ARTIFACT_ROOT}/Qwen/Qwen3-4B_torch_dist
    --load ${LOAD_DIR}
-   --save ${RUN_DIR}/checkpoints/
-   --save-interval 100
+   # Save back into the load dir: keeps everything in one run dir and lets a
+   # requeued job pick up from the latest checkpoint via the tracker file.
+   --save ${LOAD_DIR}
+   # Checkpoint every 5 steps, but keep permanently only every 50th step: on
+   # each save Megatron deletes the previous checkpoint unless it falls on the
+   # retain interval, so the newest checkpoint always exists (cheap requeue
+   # recovery) without accumulating one every 5 steps. slime numbers saves with
+   # 0-based rollout ids, so retained checkpoints are iterations 49, 99, 149,
+   # ... (the retention test is (iteration+1) % 50 == 0 -- see the slime patch
+   # in Megatron-LM/megatron/training/checkpointing.py; upstream's plain
+   # modulo would never match slime's numbering and delete everything).
+   --save-interval 5
+   --save-retain-interval 50
    --rotary-base 1000000
    # We bump --num-rollout below to train past the original schedule, which
    # changes the derived lr_decay_steps and would otherwise fail the scheduler's
@@ -219,12 +248,20 @@ EVAL_ARGS=(
 
 # Cap the open-file limit: the default (1048576) triggers a raylet SIGABRT crash
 # ("Too many open files") in gRPC/boost-asio, which kills the dashboard job agent
-# and makes `ray job submit` fail with a 500 / ServerDisconnectedError.
-ulimit -n 65535
+# and makes `ray job submit` fail with a 500 / ServerDisconnectedError. Only
+# lower it: since ~2026-07-11 jobs get a 51200 hard limit (cluster-wide, even
+# with --propagate=NONE), and raising past the hard limit fails.
+if [ "$(ulimit -n)" -gt 65535 ]; then ulimit -n 65535; fi
 
 # launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+# Dashboard port is overridable: on shared nodes another user's Ray cluster may
+# already own the default 8265, and `ray job submit` would silently target theirs.
+DASH_PORT=${DASH_PORT:-8270}
+# The job agent binds its own HTTP port (default 52365) — also shared per-node, and
+# a collision leaves the dashboard with no agent ("No available agent to submit job").
+AGENT_PORT=${AGENT_PORT:-52370}
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=${DASH_PORT} --dashboard-agent-listen-port=${AGENT_PORT}
 
 # Build the runtime environment JSON with proper variable substitution.
 # ${REPO_ROOT}/real-time puts the obstacles `environment` package on PYTHONPATH
@@ -239,7 +276,7 @@ RUNTIME_ENV_JSON="{
   }
 }"
 
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://127.0.0.1:${DASH_PORT}" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 slime/train.py \
    --actor-num-nodes 1 \

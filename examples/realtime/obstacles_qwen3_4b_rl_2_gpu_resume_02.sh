@@ -192,12 +192,20 @@ EVAL_ARGS=(
 
 # Cap the open-file limit: the default (1048576) triggers a raylet SIGABRT crash
 # ("Too many open files") in gRPC/boost-asio, which kills the dashboard job agent
-# and makes `ray job submit` fail with a 500 / ServerDisconnectedError.
-ulimit -n 65535
+# and makes `ray job submit` fail with a 500 / ServerDisconnectedError. Only
+# lower it: since ~2026-07-11 jobs get a 51200 hard limit (cluster-wide, even
+# with --propagate=NONE), and raising past the hard limit fails.
+if [ "$(ulimit -n)" -gt 65535 ]; then ulimit -n 65535; fi
 
 # launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+# Dashboard port is overridable: on shared nodes another user's Ray cluster may
+# already own the default 8265, and `ray job submit` would silently target theirs.
+DASH_PORT=${DASH_PORT:-8270}
+# The job agent binds its own HTTP port (default 52365) — also shared per-node, and
+# a collision leaves the dashboard with no agent ("No available agent to submit job").
+AGENT_PORT=${AGENT_PORT:-52370}
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=${DASH_PORT} --dashboard-agent-listen-port=${AGENT_PORT}
 
 # Build the runtime environment JSON with proper variable substitution.
 # ${REPO_ROOT}/real-time puts the obstacles `environment` package on PYTHONPATH
@@ -212,7 +220,7 @@ RUNTIME_ENV_JSON="{
   }
 }"
 
-ray job submit --address="http://127.0.0.1:8265" \
+ray job submit --address="http://127.0.0.1:${DASH_PORT}" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 slime/train.py \
    --actor-num-nodes 1 \

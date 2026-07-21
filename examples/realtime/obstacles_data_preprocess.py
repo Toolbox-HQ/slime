@@ -39,6 +39,11 @@ from environment.realtime_frogger import (
     REALTIME_FROGGER_STREAM_SYSTEM_PROMPT,
     REALTIME_FROGGER_SYSTEM_PROMPT,
 )
+from environment.realtime_snake import (
+    REALTIME_SNAKE_STREAM_SYSTEM_PROMPT,
+    REALTIME_SNAKE_SYSTEM_PROMPT,
+)
+from environment.snake import SNAKE_SYSTEM_PROMPT
 from environment.static_obstacles_grpo import SYSTEM_PROMPT as STATIC_SYSTEM_PROMPT
 
 # Default system prompt per environment. The keys must match ENV_REGISTRY in
@@ -50,6 +55,10 @@ ENV_SYSTEM_PROMPTS = {
     "frogger": FROGGER_SYSTEM_PROMPT,
     "realtime_frogger": REALTIME_FROGGER_SYSTEM_PROMPT,
     "realtime_frogger_stream": REALTIME_FROGGER_STREAM_SYSTEM_PROMPT,
+    "snake": SNAKE_SYSTEM_PROMPT,
+    "realtime_snake": REALTIME_SNAKE_SYSTEM_PROMPT,
+    "realtime_snake_stream": REALTIME_SNAKE_STREAM_SYSTEM_PROMPT,
+    "realtime_snake_stream_2400": REALTIME_SNAKE_STREAM_SYSTEM_PROMPT,
 }
 
 

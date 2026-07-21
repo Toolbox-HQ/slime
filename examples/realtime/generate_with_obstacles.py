@@ -42,6 +42,13 @@ from environment.realtime_frogger import (
     REALTIME_FROGGER_SYSTEM_PROMPT,
     RealtimeFroggerToolEnv,
 )
+from environment.realtime_snake import (
+    REALTIME_SNAKE_STREAM_SYSTEM_PROMPT,
+    REALTIME_SNAKE_SYSTEM_PROMPT,
+    RealtimeSnake2400ToolEnv,
+    RealtimeSnakeToolEnv,
+)
+from environment.snake import SNAKE_SYSTEM_PROMPT, SnakeToolEnv
 from environment.static_obstacles_grpo import SYSTEM_PROMPT as STATIC_SYSTEM_PROMPT
 from environment.static_obstacles_grpo import StaticObstaclesToolEnv
 
@@ -63,13 +70,32 @@ ENV_REGISTRY: dict[str, tuple[type, str]] = {
     # grid is force-fed into the model's reasoning every movement window. Use with
     # --custom-generate-function-path generate_with_obstacles.generate_streaming.
     "realtime_frogger_stream": (RealtimeFroggerToolEnv, REALTIME_FROGGER_STREAM_SYSTEM_PROMPT),
+    # Synchronous snake (Frogger-style: one tool call = one time step; the move
+    # turns the snake, then it slides one cell).
+    "snake": (SnakeToolEnv, SNAKE_SYSTEM_PROMPT),
+    "realtime_snake": (RealtimeSnakeToolEnv, REALTIME_SNAKE_SYSTEM_PROMPT),
+    # Same tool-env, but driven by the streaming rollout (generate_streaming): the
+    # grid is force-fed into the model's reasoning every movement window. Use with
+    # --custom-generate-function-path generate_with_obstacles.generate_streaming.
+    "realtime_snake_stream": (RealtimeSnakeToolEnv, REALTIME_SNAKE_STREAM_SYSTEM_PROMPT),
+    # Same streaming env at an easier clock (2400 tokens per movement window, the
+    # edge of the zero-shot plateau) for training with usable reward signal.
+    "realtime_snake_stream_2400": (RealtimeSnake2400ToolEnv, REALTIME_SNAKE_STREAM_SYSTEM_PROMPT),
 }
 # Used when a sample carries no ``env`` (keeps old single-task datasets working).
 DEFAULT_ENV = "clear_obstacles"
 
 # Any registered tool-env. The wrappers are duck-typed (no shared base class),
 # so this is a plain union of the registered classes for annotation purposes.
-ToolEnv = ClearObstaclesToolEnv | StaticObstaclesToolEnv | FroggerToolEnv | RealtimeFroggerToolEnv
+ToolEnv = (
+    ClearObstaclesToolEnv
+    | StaticObstaclesToolEnv
+    | FroggerToolEnv
+    | RealtimeFroggerToolEnv
+    | SnakeToolEnv
+    | RealtimeSnakeToolEnv
+    | RealtimeSnake2400ToolEnv
+)
 
 # Max number of moves (tool calls) before we cut the episode off.
 MAX_TURNS = 64
@@ -82,22 +108,60 @@ STREAM_MAX_WINDOWS = 512
 # The four move tools exposed to the model.
 MOVES = ("move_up", "move_down", "move_left", "move_right")
 
-TOOL_SPECS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": desc,
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    }
-    for name, desc in (
+
+def _move_tool_specs(descriptions: tuple[tuple[str, str], ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": desc,
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        }
+        for name, desc in descriptions
+    ]
+
+
+TOOL_SPECS: list[dict[str, Any]] = _move_tool_specs(
+    (
         ("move_up", "Move F up one row (row - 1, toward the GOAL)."),
         ("move_down", "Move F down one row (row + 1)."),
         ("move_left", "Move F left one column (col - 1)."),
         ("move_right", "Move F right one column (col + 1)."),
     )
-]
+)
+
+# Same four moves, worded for snake: move_* sets the snake's heading rather than
+# stepping the character one cell. No apostrophes here: the Jinja tojson filter
+# HTML-escapes them to ' in the rendered prompt.
+SNAKE_TOOL_SPECS: list[dict[str, Any]] = _move_tool_specs(
+    (
+        ("move_up", "Steer the snake up (heading row - 1)."),
+        ("move_down", "Steer the snake down (heading row + 1)."),
+        ("move_left", "Steer the snake left (heading col - 1)."),
+        ("move_right", "Steer the snake right (heading col + 1)."),
+    )
+)
+
+# Synchronous snake: the move turns the snake and it slides one cell immediately.
+SNAKE_SYNC_TOOL_SPECS: list[dict[str, Any]] = _move_tool_specs(
+    (
+        ("move_up", "Turn the snake up (row - 1) and slide one cell."),
+        ("move_down", "Turn the snake down (row + 1) and slide one cell."),
+        ("move_left", "Turn the snake left (col - 1) and slide one cell."),
+        ("move_right", "Turn the snake right (col + 1) and slide one cell."),
+    )
+)
+
+# Env-specific tool-spec wording; envs not listed here use TOOL_SPECS, keeping the
+# rendered prompts of the pre-existing envs byte-identical.
+ENV_TOOL_SPECS: dict[str, list[dict[str, Any]]] = {
+    "snake": SNAKE_SYNC_TOOL_SPECS,
+    "realtime_snake": SNAKE_TOOL_SPECS,
+    "realtime_snake_stream": SNAKE_TOOL_SPECS,
+    "realtime_snake_stream_2400": SNAKE_TOOL_SPECS,
+}
 
 INVALID_ACTION_MSG = (
     "Invalid action: no valid tool call was found. Emit exactly one tool call, e.g.\n"
@@ -145,14 +209,16 @@ For each function call, return a json object with function name and arguments wi
 """
 
 
-def format_initial_prompt(system_prompt: str, initial_obs: str) -> str:
+def format_initial_prompt(
+    system_prompt: str, initial_obs: str, tool_specs: list[dict[str, Any]] = TOOL_SPECS
+) -> str:
     """Render the opening prompt: game rules (system) + starting grid (user)."""
     template = Template(TOOL_TEMPLATE)
     messages = [
         {"role": "system", "content": system_prompt or CLEAR_SYSTEM_PROMPT},
         {"role": "user", "content": initial_obs},
     ]
-    return template.render(messages=messages, tools=TOOL_SPECS)
+    return template.render(messages=messages, tools=tool_specs)
 
 
 def parse_action(prediction: str) -> str | None:
@@ -271,7 +337,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
     # Carry the system prompt from the dataset (falls back to the env's default).
     system_prompt = sample.prompt if isinstance(sample.prompt, str) and sample.prompt else default_system_prompt
-    prompt = format_initial_prompt(system_prompt, initial_obs)
+    prompt = format_initial_prompt(system_prompt, initial_obs, ENV_TOOL_SPECS.get(env_name, TOOL_SPECS))
 
     prompt_tokens_ids = state.tokenizer(prompt, add_special_tokens=False)["input_ids"]
     response = ""
@@ -458,7 +524,7 @@ async def generate_streaming(args, sample: Sample, sampling_params) -> Sample:
     window = env.tokens_per_movement
 
     system_prompt = sample.prompt if isinstance(sample.prompt, str) and sample.prompt else default_system_prompt
-    prompt = format_initial_prompt(system_prompt, initial_obs)
+    prompt = format_initial_prompt(system_prompt, initial_obs, ENV_TOOL_SPECS.get(env_name, TOOL_SPECS))
 
     prompt_tokens_ids = state.tokenizer(prompt, add_special_tokens=False)["input_ids"]
     response = ""

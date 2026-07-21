@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --output=.cache/slurm-out/slurm-%j.out
 
 # RL on the STREAMING real-time Snake env (real-time/environment/realtime_snake,
 # env tag `realtime_snake_stream`). The world runs on a token cadence: every

@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --output=.cache/slurm-out/slurm-%j.out
 
 # RL on the STREAMING real-time Snake env at an EASIER CLOCK: 2400 tokens per
 # movement window (env tag `realtime_frogger_stream_200`). 2400 sits at the edge of
@@ -14,10 +15,10 @@
 #     24h SLURM allocation).
 #   * --save-interval 20 with --save-retain-interval 100 (newest checkpoint always
 #     kept for requeue recovery; every 100th kept permanently)
-#   * token budgets raised: episodes at 2400 tokens/move average ~13k response
-#     tokens, so the default 16384 budget would truncate heavily (and truncated
-#     episodes score 0). rollout/eval response len 24576, context len 26624, and
-#     --max-tokens-per-gpu raised to match so a single episode fits a micro-batch.
+#   * token budgets match the base training script: rollout/eval response len
+#     16384, --max-tokens-per-gpu 17408 (no --rollout-max-context-len). NOTE: at
+#     2400 tokens/move this caps an episode at ~6-7 movement windows, so longer
+#     games can truncate before finishing (truncated episodes score 0).
 #   * --eval-interval 10 (256-seed streaming evals are slow at this window)
 #   * the wandb group.
 #
@@ -135,10 +136,7 @@ ROLLOUT_ARGS=(
    --num-rollout 300
    --rollout-batch-size 32
    --n-samples-per-prompt 8
-   # Episodes at 2400 tokens/move average ~13k response tokens; 16384 would
-   # truncate heavily and truncated episodes score 0.
-   --rollout-max-response-len 24576
-   --rollout-max-context-len 26624
+   --rollout-max-response-len 16384
    --rollout-temperature 1
 
    # Dump every rollout's samples (decoded completions + prompt/tokens/loss_mask/
@@ -164,9 +162,7 @@ PERF_ARGS=(
 
    # --micro-batch-size 1
    --use-dynamic-batch-size
-   # Raised from 17408 so a single max-length episode (26624 tokens of context)
-   # still fits one micro-batch bucket.
-   --max-tokens-per-gpu 26624
+   --max-tokens-per-gpu 17408
 )
 
 GRPO_ARGS=(
@@ -222,7 +218,7 @@ EVAL_ARGS=(
    --eval-interval 10
    --eval-prompt-data realtime_frogger_stream_200 $HOME/obstacles-seeds/eval_realtime_frogger_stream_200.jsonl
    --n-samples-per-eval-prompt 1
-   --eval-max-response-len 24576
+   --eval-max-response-len 16384
    --eval-temperature 0.7
    --eval-top-p 0.95
 )

@@ -1,4 +1,5 @@
 #!/bin/bash
+#SBATCH --output=.cache/slurm-out/slurm-%j.out
 
 # Resume version of snake_qwen3_4b_rl_stream_2_gpu.sh: continues RL training on
 # the STREAMING real-time Snake env (env tag `realtime_snake_stream`) from a

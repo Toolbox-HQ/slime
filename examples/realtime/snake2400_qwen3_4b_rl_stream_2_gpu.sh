@@ -246,6 +246,7 @@ ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-s
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"./Megatron-LM/:${SCRIPT_DIR}:./slime:${REPO_ROOT}/real-time\",
+    \"TICK_RATE\": \"2400\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
     \"LIBRARY_PATH\": \"${LIBRARY_PATH}\",

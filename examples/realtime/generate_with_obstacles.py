@@ -45,7 +45,6 @@ from environment.realtime_frogger import (
 from environment.realtime_snake import (
     REALTIME_SNAKE_STREAM_SYSTEM_PROMPT,
     REALTIME_SNAKE_SYSTEM_PROMPT,
-    RealtimeSnake2400ToolEnv,
     RealtimeSnakeToolEnv,
 )
 from environment.snake import SNAKE_SYSTEM_PROMPT, SnakeToolEnv
@@ -70,6 +69,9 @@ ENV_REGISTRY: dict[str, tuple[type, str]] = {
     # grid is force-fed into the model's reasoning every movement window. Use with
     # --custom-generate-function-path generate_with_obstacles.generate_streaming.
     "realtime_frogger_stream": (RealtimeFroggerToolEnv, REALTIME_FROGGER_STREAM_SYSTEM_PROMPT),
+    # Same streaming env; the movement rate follows the TICK_RATE env var (set to 200
+    # by the frogger200 launcher). Same class and prompt as realtime_frogger_stream.
+    "realtime_frogger_stream_200": (RealtimeFroggerToolEnv, REALTIME_FROGGER_STREAM_SYSTEM_PROMPT),
     # Synchronous snake (Frogger-style: one tool call = one time step; the move
     # turns the snake, then it slides one cell).
     "snake": (SnakeToolEnv, SNAKE_SYSTEM_PROMPT),
@@ -78,9 +80,9 @@ ENV_REGISTRY: dict[str, tuple[type, str]] = {
     # grid is force-fed into the model's reasoning every movement window. Use with
     # --custom-generate-function-path generate_with_obstacles.generate_streaming.
     "realtime_snake_stream": (RealtimeSnakeToolEnv, REALTIME_SNAKE_STREAM_SYSTEM_PROMPT),
-    # Same streaming env at an easier clock (2400 tokens per movement window, the
-    # edge of the zero-shot plateau) for training with usable reward signal.
-    "realtime_snake_stream_2400": (RealtimeSnake2400ToolEnv, REALTIME_SNAKE_STREAM_SYSTEM_PROMPT),
+    # Same streaming env; the movement rate follows the TICK_RATE env var (defaulting
+    # to 2400, the edge of the zero-shot plateau) for training with usable reward signal.
+    "realtime_snake_stream_2400": (RealtimeSnakeToolEnv, REALTIME_SNAKE_STREAM_SYSTEM_PROMPT),
 }
 # Used when a sample carries no ``env`` (keeps old single-task datasets working).
 DEFAULT_ENV = "clear_obstacles"
@@ -94,7 +96,6 @@ ToolEnv = (
     | RealtimeFroggerToolEnv
     | SnakeToolEnv
     | RealtimeSnakeToolEnv
-    | RealtimeSnake2400ToolEnv
 )
 
 # Max number of moves (tool calls) before we cut the episode off.

@@ -1,13 +1,13 @@
 #!/bin/bash
 #SBATCH --output=.cache/slurm-out/slurm-%j.out
 
-# RL on the STREAMING real-time Snake env at an EASIER CLOCK: 2400 tokens per
-# movement window (env tag `realtime_frogger_stream_200`). 2400 sits at the edge of
-# the zero-shot plateau (shaped reward ~0.22 there vs 0.04 at the default 600), so
-# training starts with usable reward signal while the clock still binds.
+# RL on the STREAMING real-time Frogger env at a FASTER CLOCK: 200 tokens per
+# movement window (env tag `realtime_frogger_stream_200`), set via the TICK_RATE
+# env var in the runtime env below. Faster than the default 600 so the clock binds
+# harder while training.
 #
-# Differences from snake_qwen3_4b_rl_stream_2_gpu.sh:
-#   * env tag / datasets -> realtime_frogger_stream_200 (tokens_per_movement=2400)
+# Differences from obstacles_qwen3_4b_rl_stream_2_gpu.sh:
+#   * TICK_RATE=200 (env tag / datasets -> realtime_frogger_stream_200)
 #   * --num-rollout 300
 #   * RESUMABLE: fixed run dir (.cache/frogger200-stream); when a checkpoint tracker
 #     exists there the script adds --load automatically, so simply resubmitting the
@@ -16,9 +16,7 @@
 #   * --save-interval 20 with --save-retain-interval 100 (newest checkpoint always
 #     kept for requeue recovery; every 100th kept permanently)
 #   * token budgets match the base training script: rollout/eval response len
-#     16384, --max-tokens-per-gpu 17408 (no --rollout-max-context-len). NOTE: at
-#     2400 tokens/move this caps an episode at ~6-7 movement windows, so longer
-#     games can truncate before finishing (truncated episodes score 0).
+#     16384, --max-tokens-per-gpu 17408 (no --rollout-max-context-len).
 #   * --eval-interval 10 (256-seed streaming evals are slow at this window)
 #   * the wandb group.
 #
@@ -242,6 +240,7 @@ ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 4 --disable-usage-s
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"./Megatron-LM/:${SCRIPT_DIR}:./slime:${REPO_ROOT}/real-time\",
+    \"TICK_RATE\": \"200\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
     \"LIBRARY_PATH\": \"${LIBRARY_PATH}\",

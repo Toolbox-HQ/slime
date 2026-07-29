@@ -55,6 +55,7 @@ ENV_SYSTEM_PROMPTS = {
     "frogger": FROGGER_SYSTEM_PROMPT,
     "realtime_frogger": REALTIME_FROGGER_SYSTEM_PROMPT,
     "realtime_frogger_stream": REALTIME_FROGGER_STREAM_SYSTEM_PROMPT,
+    "realtime_frogger_stream_200": REALTIME_FROGGER_STREAM_SYSTEM_PROMPT,
     "snake": SNAKE_SYSTEM_PROMPT,
     "realtime_snake": REALTIME_SNAKE_SYSTEM_PROMPT,
     "realtime_snake_stream": REALTIME_SNAKE_STREAM_SYSTEM_PROMPT,

@@ -1,0 +1,45 @@
+eval:
+  defaults:
+    input_key: prompt
+    label_key: seed
+    n_samples_per_eval_prompt: 1
+    max_response_len: 16384
+    temperature: 0.7
+    top_p: 0.95
+  datasets:
+    - name: frogger_tpm_1000
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 1000}
+    - name: frogger_tpm_900
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 900}
+    - name: frogger_tpm_800
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 800}
+    - name: frogger_tpm_700
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 700}
+    - name: frogger_tpm_600
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 600}
+    - name: frogger_tpm_500
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 500}
+    - name: frogger_tpm_400
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 400}
+    - name: frogger_tpm_300
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 300}
+    - name: frogger_tpm_200
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 200}
+    - name: frogger_tpm_100
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 100}
+    - name: frogger_tpm_50
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 50}
+    - name: frogger_tpm_20
+      path: ${oc.env:ARTIFACT_ROOT}/obstacles-seeds/eval_realtime_frogger_stream_range.jsonl
+      metadata_overrides: {env: realtime_frogger_stream, tokens_per_movement: 20}

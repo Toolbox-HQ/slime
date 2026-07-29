@@ -12,6 +12,10 @@ the whole tool-calling loop, so every move acts on the real grid the seed descri
 The constant ``prompt`` column carries the game rules via ``--input-key prompt``, and
 the ``metadata.env`` field selects which tool-env to instantiate.
 
+For real-time environments, ``--tokens-per-movement-range MIN MAX`` additionally
+stores a random clock on every row. Keeping the clock in row metadata means every
+sample copied from one prompt (for example, a GRPO group) faces the same task.
+
 Multi-env mixing: rows are always written **stratified round-robin** across the
 requested ``--env`` values (A, B, A, B, ...). slime serves each rollout step a
 *contiguous* slice of the dataset (rollout-batch-size prompts) and we disable
@@ -30,6 +34,7 @@ Requires the ``environment`` package (``real-time/environment``) to be importabl
 
 import argparse
 import json
+import math
 import os
 import random
 
@@ -62,23 +67,70 @@ ENV_SYSTEM_PROMPTS = {
     "realtime_snake_stream_2400": REALTIME_SNAKE_STREAM_SYSTEM_PROMPT,
 }
 
+TOKEN_AWARE_ENVS = {
+    "realtime_frogger",
+    "realtime_frogger_stream",
+    "realtime_frogger_stream_200",
+    "realtime_snake",
+    "realtime_snake_stream",
+    "realtime_snake_stream_2400",
+}
 
-def _env_rows(n: int, rng: random.Random, env: str) -> list[dict]:
+
+def _sample_tokens_per_movement(
+    rng: random.Random,
+    bounds: tuple[int, int],
+    sampling: str,
+) -> int:
+    minimum, maximum = bounds
+    if sampling == "uniform":
+        return rng.randint(minimum, maximum)
+    if sampling == "log-uniform":
+        # Cadence difficulty changes multiplicatively: 20->40 is a comparable
+        # change to 500->1000. Sampling in log space prevents the fast end of a
+        # 20..1000 range from being only a tiny fraction of training prompts.
+        value = round(math.exp(rng.uniform(math.log(minimum), math.log(maximum))))
+        return min(max(value, minimum), maximum)
+    raise ValueError(f"Unknown tokens-per-movement sampling mode: {sampling}")
+
+
+def _env_rows(
+    n: int,
+    rng: random.Random,
+    env: str,
+    tokens_per_movement_range: tuple[int, int] | None = None,
+    tokens_per_movement_sampling: str = "uniform",
+) -> list[dict]:
     """Build ``n`` rows for a single env, each with an independent random seed."""
     system_prompt = ENV_SYSTEM_PROMPTS[env]
-    return [
-        {
-            "prompt": system_prompt,
-            "seed": rng.randint(0, 2**31 - 1),
-            # Tags the row with its environment; loaded verbatim into
-            # sample.metadata and read by generate_with_obstacles.generate.
-            "metadata": {"env": env},
-        }
-        for _ in range(n)
-    ]
+    rows = []
+    for _ in range(n):
+        metadata = {"env": env}
+        if tokens_per_movement_range is not None:
+            metadata["tokens_per_movement"] = _sample_tokens_per_movement(
+                rng,
+                tokens_per_movement_range,
+                tokens_per_movement_sampling,
+            )
+        rows.append(
+            {
+                "prompt": system_prompt,
+                "seed": rng.randint(0, 2**31 - 1),
+                # Tags the row with its environment; loaded verbatim into
+                # sample.metadata and read by generate_with_obstacles.generate.
+                "metadata": metadata,
+            }
+        )
+    return rows
 
 
-def build_rows(n: int, rng: random.Random, envs: list[str]) -> list[dict]:
+def build_rows(
+    n: int,
+    rng: random.Random,
+    envs: list[str],
+    tokens_per_movement_range: tuple[int, int] | None = None,
+    tokens_per_movement_sampling: str = "uniform",
+) -> list[dict]:
     """Build ``n`` rows split equally across ``envs`` and stratified round-robin.
 
     Each env gets ``n // len(envs)`` rows (with independently drawn seeds), then the
@@ -94,7 +146,16 @@ def build_rows(n: int, rng: random.Random, envs: list[str]) -> list[dict]:
         )
     per_env = n // num_envs
     # Draw each env's seeds independently; this also acts as the per-env shuffle.
-    env_rows = [_env_rows(per_env, rng, env) for env in envs]
+    env_rows = [
+        _env_rows(
+            per_env,
+            rng,
+            env,
+            tokens_per_movement_range,
+            tokens_per_movement_sampling,
+        )
+        for env in envs
+    ]
     # Round-robin interleave: rows[i*num_envs + j] belongs to envs[j].
     return [env_rows[j][i] for i in range(per_env) for j in range(num_envs)]
 
@@ -124,13 +185,55 @@ def main() -> None:
             "multiple of the env count and --rollout-shuffle off)."
         ),
     )
+    parser.add_argument(
+        "--tokens-per-movement-range",
+        type=int,
+        nargs=2,
+        metavar=("MIN", "MAX"),
+        help=(
+            "Assign every prompt an independently sampled tokens_per_movement value "
+            "in the inclusive range MIN..MAX. Only valid for realtime_* envs."
+        ),
+    )
+    parser.add_argument(
+        "--tokens-per-movement-sampling",
+        choices=("uniform", "log-uniform"),
+        default="uniform",
+        help=(
+            "Distribution used with --tokens-per-movement-range. Log-uniform gives "
+            "multiplicative cadence ranges balanced coverage (default: uniform)."
+        ),
+    )
     args = parser.parse_args()
 
     if len(set(args.env)) != len(args.env):
         parser.error(f"--env contains duplicates: {args.env}")
+    tokens_per_movement_range = None
+    if args.tokens_per_movement_range is not None:
+        minimum, maximum = args.tokens_per_movement_range
+        if minimum <= 0 or maximum <= 0:
+            parser.error("--tokens-per-movement-range values must be positive")
+        if minimum > maximum:
+            parser.error("--tokens-per-movement-range MIN must be <= MAX")
+        unsupported = sorted(set(args.env) - TOKEN_AWARE_ENVS)
+        if unsupported:
+            parser.error(
+                "--tokens-per-movement-range requires realtime_* envs; "
+                f"unsupported: {unsupported}"
+            )
+        tokens_per_movement_range = (minimum, maximum)
 
     rng = random.Random(args.seed)
-    write_jsonl(args.out, build_rows(args.train_size, rng, args.env))
+    write_jsonl(
+        args.out,
+        build_rows(
+            args.train_size,
+            rng,
+            args.env,
+            tokens_per_movement_range,
+            args.tokens_per_movement_sampling,
+        ),
+    )
 
 
 if __name__ == "__main__":

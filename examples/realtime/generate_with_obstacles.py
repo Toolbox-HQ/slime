@@ -98,6 +98,36 @@ ToolEnv = (
     | RealtimeSnakeToolEnv
 )
 
+
+def _make_env(env_cls: type, env_name: str, metadata: dict[str, Any]) -> ToolEnv:
+    """Instantiate an env, applying a per-prompt movement cadence when present.
+
+    ``TICK_RATE`` remains the fallback for existing datasets and launchers. Range
+    training and multi-speed eval carry ``tokens_per_movement`` in sample metadata
+    so concurrent prompts can use different clocks inside the same worker process.
+    """
+    tokens_per_movement = metadata.get("tokens_per_movement")
+    if tokens_per_movement is None:
+        return env_cls()
+    if not getattr(env_cls, "token_aware", False):
+        raise ValueError(
+            f"Environment '{env_name}' does not accept tokens_per_movement metadata; "
+            "use a realtime_* environment."
+        )
+    try:
+        tokens_per_movement = int(tokens_per_movement)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid tokens_per_movement={tokens_per_movement!r} for environment '{env_name}'"
+        ) from exc
+    if tokens_per_movement <= 0:
+        raise ValueError(
+            f"tokens_per_movement must be positive for environment '{env_name}', "
+            f"got {tokens_per_movement}"
+        )
+    return env_cls(tokens_per_movement=tokens_per_movement)
+
+
 # Max number of moves (tool calls) before we cut the episode off.
 MAX_TURNS = 64
 
@@ -333,7 +363,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     # Reconstruct the exact grid from the dataset seed and keep this env instance
     # live across every move below.
     seed = int(sample.label) if sample.label is not None else None
-    env = env_cls()
+    env = _make_env(env_cls, env_name, meta)
     initial_obs = env.reset(seed=seed) if seed is not None else env.reset()
 
     # Carry the system prompt from the dataset (falls back to the env's default).
@@ -450,6 +480,8 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     sample.metadata["env_done"] = bool(env.done)
     sample.metadata["env_won"] = bool(env.env.won) if env.env is not None else False
     sample.metadata["move_count"] = move_count
+    if hasattr(env, "tokens_per_movement"):
+        sample.metadata["tokens_per_movement"] = int(env.tokens_per_movement)
 
     sample.tokens = prompt_tokens_ids + response_token_ids
     sample.response_length = len(response_token_ids)
@@ -517,7 +549,7 @@ async def generate_streaming(args, sample: Sample, sampling_params) -> Sample:
         )
 
     seed = int(sample.label) if sample.label is not None else None
-    env = env_cls()
+    env = _make_env(env_cls, env_name, meta)
     initial_obs = env.reset(seed=seed) if seed is not None else env.reset()
 
     # One movement window == this many tokens == one car tick. Read off the env so it
@@ -533,6 +565,10 @@ async def generate_streaming(args, sample: Sample, sampling_params) -> Sample:
     loss_masks = []
     move_count = 0
     injection_count = 0
+    # A complete tool call can span multiple short windows (especially at the
+    # 20-token end of range training). Keep only model-authored text here, without
+    # injected observations, and scan the whole open assistant turn for an action.
+    pending_model_text = ""
 
     if args.rollout_max_context_len is not None:
         max_context_length = args.rollout_max_context_len
@@ -581,9 +617,10 @@ async def generate_streaming(args, sample: Sample, sampling_params) -> Sample:
         response += cur_response
         response_token_ids += cur_response_token_ids
         loss_masks += [1] * len(cur_response_token_ids)
+        pending_model_text += cur_response
 
         finish = output["meta_info"]["finish_reason"]["type"]
-        action = parse_action(cur_response)
+        action = parse_action(pending_model_text)
         hit_full_window = finish == "length" and chunk_cap == window
 
         # Decide what to append (masked env feedback) and whether the episode ends.
@@ -594,6 +631,7 @@ async def generate_streaming(args, sample: Sample, sampling_params) -> Sample:
             move_count += 1
             terminal = env.done
             next_text = tool_response_turn(obs, open_assistant=not terminal)
+            pending_model_text = ""
         elif hit_full_window:
             # FORCE-FEED: a window elapsed mid-think. Cars +1 (may run over the
             # stationary frog); splice the grid into the still-open assistant turn.
@@ -611,6 +649,7 @@ async def generate_streaming(args, sample: Sample, sampling_params) -> Sample:
             terminal = env.done
             msg = obs if terminal else f"{INVALID_ACTION_MSG}\n{obs}"
             next_text = tool_response_turn(msg, open_assistant=not terminal)
+            pending_model_text = ""
         else:
             # Unexpected finish reason; stop defensively.
             break
@@ -649,6 +688,7 @@ async def generate_streaming(args, sample: Sample, sampling_params) -> Sample:
     sample.metadata["env_won"] = bool(env.env.won) if env.env is not None else False
     sample.metadata["move_count"] = move_count
     sample.metadata["injection_count"] = injection_count
+    sample.metadata["tokens_per_movement"] = int(window)
 
     sample.tokens = prompt_tokens_ids + response_token_ids
     sample.response_length = len(response_token_ids)
@@ -677,4 +717,5 @@ async def reward_func(args, sample, **kwargs):
         "score": float(metadata.get("env_reward", 0.0)),
         "won": bool(metadata.get("env_won", False)),
         "move_count": int(metadata.get("move_count", 0)),
+        "tokens_per_movement": int(metadata.get("tokens_per_movement", 0)),
     }

@@ -78,7 +78,7 @@ rollout can import `environment.clear_obstacles`.
 
 ## Frogger speed-range training
 
-`frogger_range_qwen3_4b_rl_stream_4_gpu.sh` trains streaming Frogger with a
+`frogger_range_qwen3_4b_rl_stream_2_gpu.sh` trains streaming Frogger with a
 separate movement cadence sampled for every prompt. The configured 20..1000
 tokens/movement range is sampled log-uniformly so the fast end is represented
 meaningfully; all eight GRPO samples in a prompt group share its seed and cadence.
@@ -91,7 +91,7 @@ Evaluation uses the same 64 seeds at 1000, 900, ..., 100, 50, and 20
 tokens/movement. Rewards are reported separately as
 `eval/frogger_tpm_<speed>`.
 
-Queue the full-node four-H200 run from the repository root:
+Queue the two-H200 run from the repository root:
 
 ```bash
 bash slime/examples/realtime/queue_frogger_range_qwen3_4b.sh

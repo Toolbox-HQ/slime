@@ -4,10 +4,9 @@
 #SBATCH --nodes=1
 #SBATCH --nodelist=watgpu1103
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=80
-#SBATCH --gres=gpu:vzhnggpu:4
-#SBATCH --mem=0
-#SBATCH --exclusive
+#SBATCH --cpus-per-task=40
+#SBATCH --gres=gpu:vzhnggpu:2
+#SBATCH --mem=200G
 #SBATCH --time=72:00:00
 #SBATCH --output=.cache/slurm-out/frogger-range-%j.out
 
@@ -37,14 +36,6 @@ if [[ -z "${MICROMAMBA_BIN}" ]]; then
 fi
 eval "$("${MICROMAMBA_BIN}" shell hook --shell bash)"
 micromamba activate slime
-
-# A full-node allocation makes this cleanup local to this user's exclusive job.
-pkill -9 -x sglang || true
-ray stop --force || true
-pkill -9 -x ray || true
-pkill -9 -x python || true
-pkill -9 -x python3 || true
-sleep 3
 
 set -x
 
@@ -214,12 +205,12 @@ fi
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 DASH_PORT="${DASH_PORT:-8273}"
 AGENT_PORT="${AGENT_PORT:-52373}"
-RAY_CPUS="${SLURM_CPUS_PER_TASK:-80}"
+RAY_CPUS="${SLURM_CPUS_PER_TASK:-40}"
 ray start \
     --head \
     --node-ip-address "${MASTER_ADDR}" \
     --num-cpus "${RAY_CPUS}" \
-    --num-gpus 4 \
+    --num-gpus 2 \
     --disable-usage-stats \
     --dashboard-host=0.0.0.0 \
     --dashboard-port="${DASH_PORT}" \
@@ -241,7 +232,7 @@ ray job submit --address="http://127.0.0.1:${DASH_PORT}" \
     --runtime-env-json="${RUNTIME_ENV_JSON}" \
     -- python3 "${REPO_ROOT}/slime/train.py" \
     --actor-num-nodes 1 \
-    --actor-num-gpus-per-node 4 \
+    --actor-num-gpus-per-node 2 \
     --colocate \
     "${MODEL_ARGS[@]}" \
     "${CKPT_ARGS[@]}" \

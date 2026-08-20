@@ -144,6 +144,19 @@ class RolloutDataSource(DataSource):
 
         path = os.path.join(self.args.load, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
         if not os.path.exists(path):
+            # rollout_id >= 0 means a model checkpoint at that iteration was loaded, so
+            # the matching dataset state must exist; its absence indicates a torn save
+            # (killed between the model save and the dataset-state save). Continuing
+            # would silently restart the dataset at row 0 and replay training data.
+            # Fresh starts and --pretrained-checkpoint finetunes arrive with -1 / None.
+            if rollout_id is not None and rollout_id >= 0:
+                raise RuntimeError(
+                    f"Dataset state {path} is missing but training resumes from iteration "
+                    f"{rollout_id}: refusing to silently restart the dataset from row 0. "
+                    f"Rewind latest_checkpointed_iteration.txt to a checkpoint whose "
+                    f"global_dataset_state_dict exists, or reconstruct the state file "
+                    f"(with --rollout-shuffle off: sample_offset = (iter+1) * rollout_batch_size)."
+                )
             logger.info(f"Checkpoint {path} does not exist.")
             return
 

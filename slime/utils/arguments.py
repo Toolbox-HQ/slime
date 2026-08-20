@@ -1798,7 +1798,10 @@ def slime_validate_args(args):
             pass
         else:
             if args.load is None:
-                args.load = args.ref_load or args.hf_checkpoint
+                # --pretrained-checkpoint warm-starts a NEW run from a donor
+                # checkpoint: it seeds the first launch only, while requeues
+                # take the branch above once this run has saved checkpoints.
+                args.load = args.pretrained_checkpoint or args.ref_load or args.hf_checkpoint
             # If is a HF checkpoint, set start_rollout_id to 0 here.
             args.start_rollout_id = 0
     else:
@@ -1810,7 +1813,11 @@ def slime_validate_args(args):
             args.no_load_optim = True
             args.no_load_rng = True
             args.finetune = True
-            args.load = args.ref_load
+            # --pretrained-checkpoint warm-starts a NEW run from a donor
+            # checkpoint: it seeds the first launch only (finetune semantics,
+            # fresh optimizer, iteration 0), while requeues never reach this
+            # branch once the run has saved its own checkpoints.
+            args.load = args.pretrained_checkpoint or args.ref_load
             if args.ref_ckpt_step is not None:
                 args.ckpt_step = args.ref_ckpt_step
             args.start_rollout_id = 0

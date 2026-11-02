@@ -3,6 +3,8 @@ import copy
 import json
 import logging
 import os
+import shlex
+import sys
 import warnings
 from typing import Any
 
@@ -1052,6 +1054,20 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Path to a custom reducer function for pg_loss only. When set, pg_loss will use this custom reducer while other metrics (pg_clipfrac, ppo_kl, entropy_loss, etc.) still use the default sum_of_sample_mean. (e.g., examples/Dr.GRPO/custom_reducer.py:get_pg_loss_reducer).",
             )
+            parser.add_argument(
+                "--mask-low-prob-tokens",
+                action="store_true",
+                default=False,
+                help=(
+                    "Drop sampled tokens whose rollout log-prob is below --low-prob-token-threshold."
+                ),
+            )
+            parser.add_argument(
+                "--low-prob-token-threshold",
+                type=float,
+                default=-10.0,
+                help="Rollout log-prob below which --mask-low-prob-tokens drops a token (default -10, i.e. p < 4.5e-5).",
+            )
 
             parser.add_argument(
                 "--use-routing-replay",
@@ -1523,6 +1539,11 @@ def _pre_parse_mode():
 def parse_args(add_custom_arguments=None):
     # Users may call `parse_args` very early, thus we ensure logger is configured here
     configure_logger()
+
+    extra_args = shlex.split(os.environ.get("SLIME_EXTRA_ARGS", ""))
+    if extra_args:
+        logger.info(f"Appending SLIME_EXTRA_ARGS to the command line: {extra_args}")
+        sys.argv.extend(extra_args)
 
     add_slime_arguments = get_slime_extra_args_provider(add_custom_arguments)
 

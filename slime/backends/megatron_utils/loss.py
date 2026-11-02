@@ -825,8 +825,8 @@ def policy_loss_function(
         Tuple of `(loss, metrics)` where `loss` is a scalar tensor and `metrics`
         is a dict containing detached scalars: "loss", "pg_loss",
         "entropy_loss", "pg_clipfrac", "ppo_kl". Additional keys "kl_loss",
-        "tis", "ois", "tis_clipfrac" are included when the respective features
-        are enabled.
+        "tis", "ois", "tis_clipfrac", "low_prob_token_frac" are included when
+        the respective features are enabled.
     """
     advantages = torch.cat(batch["advantages"], dim=0)
     old_log_probs = batch["rollout_log_probs"] if args.use_rollout_logprobs else batch.get("log_probs")
@@ -903,6 +903,12 @@ def policy_loss_function(
 
     if args.use_opsm:
         pg_loss = pg_loss * opsm_mask
+
+    if args.mask_low_prob_tokens:
+        assert batch.get("rollout_log_probs"), "rollout_log_probs must be provided for --mask-low-prob-tokens"
+        low_prob_tokens = torch.cat(batch["rollout_log_probs"], dim=0) < args.low_prob_token_threshold
+        pg_loss = pg_loss.masked_fill(low_prob_tokens, 0.0)
+        low_prob_token_frac = sum_of_sample_mean(low_prob_tokens.float())
 
     # Apply off-policy correction using importance sampling if enabled
     if args.get_mismatch_metrics or args.use_tis:
@@ -1023,6 +1029,9 @@ def policy_loss_function(
 
     if args.use_opsm:
         reported_loss["opsm_clipfrac"] = opsm_clipfrac
+
+    if args.mask_low_prob_tokens:
+        reported_loss["low_prob_token_frac"] = low_prob_token_frac.clone().detach()
 
     # Add OPD metrics if available
     if "opd_reverse_kl" in batch:
